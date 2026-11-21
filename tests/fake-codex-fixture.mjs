@@ -306,6 +306,7 @@ rl.on("line", (line) => {
         break;
 
       case "thread/start": {
+        state.requestedSandbox = message.params.sandbox;
         if (BEHAVIOR === "auth-run-fails") {
           throw new Error("authentication expired; run codex login");
         }
@@ -341,6 +342,7 @@ rl.on("line", (line) => {
       }
 
       case "thread/resume": {
+        state.requestedSandbox = message.params.sandbox;
         if (requiresExperimental("persistExtendedHistory", message, state) || requiresExperimental("persistFullHistory", message, state)) {
           throw new Error("thread/resume.persistFullHistory requires experimentalApi capability");
         }

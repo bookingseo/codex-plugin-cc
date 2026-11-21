@@ -71,6 +71,7 @@ const DEFAULT_STATUS_POLL_INTERVAL_MS = 2000;
 const VALID_REASONING_EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh"]);
 const MODEL_ALIASES = new Map([["spark", "gpt-5.3-codex-spark"]]);
 const STOP_REVIEW_TASK_MARKER = "Run a stop-gate review of the previous Claude turn.";
+const STOP_REVIEW_TITLE = "Codex Stop Gate Review";
 
 function printUsage() {
   console.log(
@@ -79,7 +80,7 @@ function printUsage() {
       "  node scripts/codex-companion.mjs setup [--enable-review-gate|--disable-review-gate] [--json]",
       "  node scripts/codex-companion.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>]",
       "  node scripts/codex-companion.mjs adversarial-review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [focus text]",
-      "  node scripts/codex-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh>] [prompt]",
+      "  node scripts/codex-companion.mjs task [--wait|--background] [--write] [--resume-session|--resume-last|--resume|--fresh] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh>] [prompt]",
       "  node scripts/codex-companion.mjs transfer [--source <claude-jsonl>] [--json]",
       "  node scripts/codex-companion.mjs status [job-id] [--all] [--json]",
       "  node scripts/codex-companion.mjs result [job-id] [--json]",
@@ -308,6 +309,7 @@ function findLatestResumableTaskJob(jobs) {
     jobs.find(
       (job) =>
         job.jobClass === "task" &&
+        job.title !== STOP_REVIEW_TITLE &&
         job.threadId &&
         job.status !== "queued" &&
         job.status !== "running"
@@ -540,7 +542,7 @@ function buildReviewJobMetadata(reviewName, target) {
 function buildTaskRunMetadata({ prompt, resumeLast = false }) {
   if (!resumeLast && String(prompt ?? "").includes(STOP_REVIEW_TASK_MARKER)) {
     return {
-      title: "Codex Stop Gate Review",
+      title: STOP_REVIEW_TITLE,
       summary: "Stop-gate review of previous Claude turn"
     };
   }
@@ -718,6 +720,9 @@ async function handleReviewCommand(argv, config) {
     }
   });
 
+  if (options.wait && options.background) {
+    throw new Error("Choose either --wait or --background.");
+  }
   const cwd = resolveCommandCwd(options);
   const workspaceRoot = resolveCommandWorkspace(options);
   const focusText = positionals.join(" ").trim();
@@ -762,19 +767,25 @@ async function handleReview(argv) {
 async function handleTask(argv) {
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["model", "effort", "cwd", "prompt-file"],
-    booleanOptions: ["json", "write", "resume-last", "resume", "fresh", "background"],
+    booleanOptions: ["json", "write", "resume-last", "resume", "resume-session", "fresh", "background", "wait"],
     aliasMap: {
       m: "model"
     }
   });
 
+  if (options.wait && options.background) {
+    throw new Error("Choose either --wait or --background.");
+  }
+  if (options["resume-session"] && !getCurrentClaudeSessionId()) {
+    throw new Error("Cannot resume without the current Claude session ID. Use --fresh with a task to start a new thread.");
+  }
   const cwd = resolveCommandCwd(options);
   const workspaceRoot = resolveCommandWorkspace(options);
   const model = normalizeRequestedModel(options.model);
   const effort = normalizeReasoningEffort(options.effort);
   const prompt = readTaskPrompt(cwd, options, positionals);
 
-  const resumeLast = Boolean(options["resume-last"] || options.resume);
+  const resumeLast = Boolean(options["resume-last"] || options.resume || options["resume-session"]);
   const fresh = Boolean(options.fresh);
   if (resumeLast && fresh) {
     throw new Error("Choose either --resume/--resume-last or --fresh.");

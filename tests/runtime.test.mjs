@@ -527,6 +527,15 @@ test("task-resume-candidate returns the latest rescue thread from the current se
             updatedAt: "2026-03-24T20:00:00.000Z"
           },
           {
+            id: "stop-current",
+            status: "completed",
+            title: "Codex Stop Gate Review",
+            jobClass: "task",
+            sessionId: "sess-current",
+            threadId: "thr_gate",
+            updatedAt: "2026-03-24T20:11:00.000Z"
+          },
+          {
             id: "task-other-session",
             status: "completed",
             title: "Codex Task",
@@ -761,6 +770,46 @@ test("task --fresh is treated as routing control and does not leak into the prom
   assert.equal(result.status, 0, result.stderr);
   const fakeState = JSON.parse(fs.readFileSync(statePath, "utf8"));
   assert.equal(fakeState.lastTurnStart.prompt, "diagnose the flaky test");
+});
+
+test("session rescue preserves literal prompt text and grants writes only on request", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir);
+  const env = { ...buildEnv(binDir), CODEX_COMPANION_SESSION_ID: "claude-1" };
+  const options = { cwd: repo, env };
+  const fakeState = () => JSON.parse(fs.readFileSync(path.join(binDir, "fake-codex-state.json"), "utf8"));
+
+  const text = "Tìm nguyên nhân\nXem ý nghĩa của --write và --resume.";
+  const diagnosis = run("node", [SCRIPT, "task", "--wait", "--", text], options);
+  assert.equal(diagnosis.status, 0, diagnosis.stderr);
+  const first = fakeState();
+  assert.equal(first.lastTurnStart.prompt, text);
+  assert.equal(first.requestedSandbox, "read-only");
+
+  const fix = run("node", [SCRIPT, "task", "--resume-session", "--write", "--", "Sửa lỗi vừa tìm được"], options);
+  assert.equal(fix.status, 0, fix.stderr);
+  const second = fakeState();
+  assert.equal(second.lastTurnStart.threadId, first.lastTurnStart.threadId);
+  assert.equal(second.requestedSandbox, "workspace-write");
+
+  const missing = run("node", [SCRIPT, "task", "--resume-session", "--", "tiếp tục"], {
+    cwd: repo,
+    env: { ...env, CODEX_COMPANION_SESSION_ID: "" }
+  });
+  assert.equal(missing.status, 1);
+  assert.match(missing.stderr, /current Claude session ID/);
+  assert.deepEqual(fakeState().lastTurnStart, second.lastTurnStart);
+});
+
+test("conflicting execution flags fail before starting a Codex job", () => {
+  const cwd = makeTempDir();
+  for (const command of ["task", "review", "adversarial-review"]) {
+    const result = run("node", [SCRIPT, command, "--wait", "--background"], { cwd });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Choose either --wait or --background/);
+  }
+  assert.equal(fs.existsSync(resolveStateDir(cwd)), false);
 });
 
 test("task forwards model selection and reasoning effort to app-server turn/start", () => {
@@ -1967,6 +2016,16 @@ test("stop hook runs a stop-time review task and blocks on findings when the rev
   assert.match(fakeState.lastTurnStart.prompt, /<compact_output_contract>/i);
   assert.match(fakeState.lastTurnStart.prompt, /Only review the work from the previous Claude turn/i);
   assert.match(fakeState.lastTurnStart.prompt, /I completed the refactor and updated the retry logic\./);
+
+  const continued = run("node", [STOP_HOOK], {
+    cwd: repo,
+    env: buildEnv(binDir),
+    input: JSON.stringify({ cwd: repo, session_id: "sess-stop-review", stop_hook_active: true })
+  });
+  assert.equal(continued.status, 0, continued.stderr);
+  assert.equal(continued.stdout, "");
+  assert.match(continued.stderr, /continuing after a stop hook/);
+  assert.deepEqual(JSON.parse(fs.readFileSync(fakeStatePath, "utf8")), fakeState);
 
   const status = run("node", [SCRIPT, "status"], {
     cwd: repo,

@@ -156,6 +156,12 @@ function main() {
     return;
   }
 
+  if (input.stop_hook_active === true) {
+    logNote("Claude is continuing after a stop hook. Use /codex:review for a fresh review of any follow-up edits.");
+    logNote(runningTaskNote);
+    return;
+  }
+
   const setupNote = buildSetupNote(cwd);
   if (setupNote) {
     logNote(setupNote);

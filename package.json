@@ -1,9 +1,9 @@
 {
-  "name": "@openai/codex-plugin-cc",
-  "version": "1.0.6",
+  "name": "@bookingseo/codex-plugin-cc",
+  "version": "1.0.7-bookingseo.1",
   "private": true,
   "type": "module",
-  "description": "Use Codex from Claude Code to review code or delegate tasks.",
+  "description": "Giao việc cho Codex, review code và phản biện spec ngay trong Claude Code.",
   "license": "Apache-2.0",
   "engines": {
     "node": ">=18.18.0"
