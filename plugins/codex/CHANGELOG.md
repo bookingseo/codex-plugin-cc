@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.7-bookingseo.4
+
+- A follow-up now runs with the permissions of its own request. Codex kept a resumed thread in the mode of its earlier run, so a read-only `--from` or `--resume` after a `--write` run could still edit files, and a `--write` follow-up after a read-only run could not. The thread is reloaded when the mode differs, and the run is refused if Codex still reports the wrong mode.
+- Accept `--effort max` and `--effort ultra`.
+- Tests stop the brokers they start and remove their temporary folders.
+
 ## 1.0.7-bookingseo.3
 
 - Keep every job when several Codex commands update the job state at once. State updates now run under a cross-process lock and are written atomically.

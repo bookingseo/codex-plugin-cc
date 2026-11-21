@@ -747,8 +747,37 @@ async function startThread(client, cwd, options = {}) {
   return response;
 }
 
+const SANDBOX_POLICY_TYPES = new Map([
+  ["read-only", "readOnly"],
+  ["workspace-write", "workspaceWrite"],
+  ["danger-full-access", "dangerFullAccess"]
+]);
+
+// A response without a sandbox (older CLI) cannot be checked and is accepted.
+function resumedWithSandbox(response, sandbox) {
+  const actual = response?.sandbox?.type;
+  return !actual || actual === SANDBOX_POLICY_TYPES.get(sandbox);
+}
+
+// The app server rejoins a thread it still has loaded and ignores the sandbox
+// asked for here, so a read-only follow-up would keep an earlier run's write
+// access. Unloading the thread makes the next resume apply the request.
 async function resumeThread(client, threadId, cwd, options = {}) {
-  return client.request("thread/resume", buildResumeParams(threadId, cwd, options));
+  const params = buildResumeParams(threadId, cwd, options);
+  let response = await client.request("thread/resume", params);
+  if (resumedWithSandbox(response, params.sandbox)) {
+    return response;
+  }
+
+  await client.request("thread/unsubscribe", { threadId });
+  response = await client.request("thread/resume", params);
+  if (!resumedWithSandbox(response, params.sandbox)) {
+    throw new Error(
+      `Codex kept thread ${threadId} in ${response.sandbox.type} mode instead of ${params.sandbox}. ` +
+        "Start a new thread with --fresh."
+    );
+  }
+  return response;
 }
 
 function buildResultStatus(turnState) {

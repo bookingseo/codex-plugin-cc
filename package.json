@@ -1,6 +1,6 @@
 {
   "name": "@bookingseo/codex-plugin-cc",
-  "version": "1.0.7-bookingseo.3",
+  "version": "1.0.7-bookingseo.4",
   "private": true,
   "type": "module",
   "description": "Giao việc cho Codex, review code và phản biện spec ngay trong Claude Code.",

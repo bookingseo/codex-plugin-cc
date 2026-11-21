@@ -270,6 +270,18 @@ if (args[0] === "login") {
 if (args[0] !== "app-server") {
   process.exit(1);
 }
+// Like the real app server, a thread loaded in this process keeps the sandbox
+// it was loaded with; later resumes rejoin it until it is unsubscribed.
+const loadedSandboxes = new Map();
+function loadSandbox(threadId, requested) {
+  if (!loadedSandboxes.has(threadId)) {
+    loadedSandboxes.set(threadId, requested || "read-only");
+  }
+  return loadedSandboxes.get(threadId) === "workspace-write"
+    ? { type: "workspaceWrite", writableRoots: [], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false }
+    : { type: "readOnly", networkAccess: false };
+}
+
 const bootState = loadState();
 bootState.appServerStarts = (bootState.appServerStarts || 0) + 1;
 saveState(bootState);
@@ -314,7 +326,7 @@ rl.on("line", (line) => {
           throw new Error("thread/start.persistFullHistory requires experimentalApi capability");
         }
         const thread = nextThread(state, message.params.cwd, message.params.ephemeral);
-        send({ id: message.id, result: { thread: buildThread(thread), model: message.params.model || "gpt-5.4", modelProvider: "openai", serviceTier: null, cwd: thread.cwd, approvalPolicy: "never", sandbox: { type: "readOnly", access: { type: "fullAccess" }, networkAccess: false }, reasoningEffort: null } });
+        send({ id: message.id, result: { thread: buildThread(thread), model: message.params.model || "gpt-5.4", modelProvider: "openai", serviceTier: null, cwd: thread.cwd, approvalPolicy: "never", sandbox: loadSandbox(thread.id, message.params.sandbox), reasoningEffort: null } });
         send({ method: "thread/started", params: { thread: { id: thread.id } } });
         break;
       }
@@ -349,7 +361,15 @@ rl.on("line", (line) => {
         const thread = ensureThread(state, message.params.threadId);
         thread.updatedAt = now();
         saveState(state);
-        send({ id: message.id, result: { thread: buildThread(thread), model: message.params.model || "gpt-5.4", modelProvider: "openai", serviceTier: null, cwd: thread.cwd, approvalPolicy: "never", sandbox: { type: "readOnly", access: { type: "fullAccess" }, networkAccess: false }, reasoningEffort: null } });
+        send({ id: message.id, result: { thread: buildThread(thread), model: message.params.model || "gpt-5.4", modelProvider: "openai", serviceTier: null, cwd: thread.cwd, approvalPolicy: "never", sandbox: loadSandbox(thread.id, message.params.sandbox), reasoningEffort: null } });
+        break;
+      }
+
+      case "thread/unsubscribe": {
+        const wasLoaded = BEHAVIOR === "sticky-sandbox" ? loadedSandboxes.has(message.params.threadId) : loadedSandboxes.delete(message.params.threadId);
+        state.unsubscribes = (state.unsubscribes || 0) + 1;
+        saveState(state);
+        send({ id: message.id, result: { status: wasLoaded ? "unsubscribed" : "notLoaded" } });
         break;
       }
 
@@ -451,6 +471,7 @@ rl.on("line", (line) => {
 	          turnId,
 	          model: message.params.model ?? null,
 	          effort: message.params.effort ?? null,
+	          sandbox: loadedSandboxes.get(message.params.threadId) ?? null,
 	          prompt
 	        };
 	        saveState(state);
