@@ -30,21 +30,23 @@ import {
   generateJobId,
   getConfig,
   listJobs,
+  updateState,
   setConfig,
   upsertJob,
   writeJobFile
 } from "./lib/state.mjs";
 import {
-  assertTaskThreadIdle,
   buildSingleJobSnapshot,
   buildStatusSnapshot,
+  claimTaskThread,
   isRescueTask,
   readStoredJob,
   resolveCancelableJob,
   resolveResultJob,
   resolveTaskThreadByJobId,
   sortJobsNewestFirst,
-  STOP_REVIEW_TITLE
+  STOP_REVIEW_TITLE,
+  taskThreadIdleGuard
 } from "./lib/job-control.mjs";
 import {
   appendLogLine,
@@ -472,9 +474,6 @@ async function executeTaskRun(request) {
   });
 
   let resumeThreadId = request.resumeThreadId ?? null;
-  if (resumeThreadId) {
-    assertTaskThreadIdle(listJobs(workspaceRoot), resumeThreadId, request.jobId);
-  }
   if (request.resumeLast) {
     const latestThread = await resolveLatestTrackedTaskThread(workspaceRoot, {
       excludeJobId: request.jobId
@@ -483,6 +482,10 @@ async function executeTaskRun(request) {
       throw new Error("No previous Codex task thread was found for this repository.");
     }
     resumeThreadId = latestThread.id;
+  }
+  if (resumeThreadId && request.jobId) {
+    // Every resume route claims its thread here before any app-server request.
+    claimTaskThread(workspaceRoot, request.jobId, resumeThreadId);
   }
 
   if (!request.prompt && !resumeThreadId) {
@@ -655,7 +658,7 @@ async function runForegroundCommand(job, runner, options = {}) {
     logFile: options.logFile,
     stderr: !options.json
   });
-  const execution = await runTrackedJob(job, () => runner(progress), { logFile });
+  const execution = await runTrackedJob(job, () => runner(progress), { logFile, guard: options.guard });
   outputResult(options.json ? execution.payload : execution.rendered, options.json);
   if (execution.exitStatus !== 0) {
     process.exitCode = execution.exitStatus;
@@ -676,21 +679,52 @@ function spawnDetachedTaskWorker(cwd, jobId) {
   return child;
 }
 
-function enqueueBackgroundTask(cwd, job, request) {
+function enqueueBackgroundTask(cwd, job, request, guard = null) {
   const { logFile } = createTrackedProgress(job);
   appendLogLine(logFile, "Queued for background execution.");
 
-  const child = spawnDetachedTaskWorker(cwd, job.id);
   const queuedRecord = {
     ...job,
     status: "queued",
     phase: "queued",
-    pid: child.pid ?? null,
+    pid: null,
     logFile,
     request
   };
-  writeJobFile(job.workspaceRoot, job.id, queuedRecord);
-  upsertJob(job.workspaceRoot, queuedRecord);
+  try {
+    upsertJob(job.workspaceRoot, queuedRecord, guard);
+  } catch (error) {
+    fs.rmSync(logFile, { force: true });
+    throw error;
+  }
+  let child;
+  try {
+    // The worker reads this record on startup, so it must exist before the spawn.
+    writeJobFile(job.workspaceRoot, job.id, queuedRecord);
+    child = spawnDetachedTaskWorker(cwd, job.id);
+  } catch (error) {
+    upsertJob(job.workspaceRoot, {
+      id: job.id,
+      status: "failed",
+      phase: "failed",
+      errorMessage: error instanceof Error ? error.message : String(error),
+      completedAt: nowIso()
+    });
+    throw error;
+  }
+  // The worker may already be running and own the record; only a job that is
+  // still queued needs the pid, so that cancel can reach the worker.
+  try {
+    updateState(job.workspaceRoot, (state) => {
+      const queued = state.jobs.find((item) => item.id === job.id && item.status === "queued");
+      if (queued) {
+        queued.pid = child.pid ?? null;
+      }
+    });
+  } catch (error) {
+    // The worker is already launched; the launch must still report its job ID.
+    appendLogLine(logFile, `Could not record the worker pid: ${error instanceof Error ? error.message : String(error)}`);
+  }
 
   return {
     payload: {
@@ -795,11 +829,13 @@ async function handleTask(argv) {
     job.threadId = resumeThreadId;
   }
   const request = { cwd, model, effort, prompt, write, resumeLast, resumeThreadId, jobId: job.id };
+  // Registering a --from job and checking that its thread is free is one step.
+  const guard = resumeThreadId ? taskThreadIdleGuard(resumeThreadId, job.id) : null;
 
   if (options.background) {
     ensureCodexAvailable(cwd);
     requireTaskRequest(prompt, resuming);
-    const { payload } = enqueueBackgroundTask(cwd, job, request);
+    const { payload } = enqueueBackgroundTask(cwd, job, request, guard);
     outputCommandResult(payload, renderQueuedTaskLaunch(payload), options.json);
     return;
   }
@@ -807,7 +843,7 @@ async function handleTask(argv) {
   await runForegroundCommand(
     job,
     (progress) => executeTaskRun({ ...request, onProgress: progress }),
-    { json: options.json }
+    { json: options.json, guard }
   );
 }
 
@@ -838,6 +874,12 @@ async function handleTaskWorker(argv) {
   const storedJob = readStoredJob(workspaceRoot, options["job-id"]);
   if (!storedJob) {
     throw new Error(`No stored job found for ${options["job-id"]}.`);
+  }
+
+  if (storedJob.status !== "queued") {
+    // Cancelled (or otherwise settled) before this worker started.
+    appendLogLine(storedJob.logFile ?? null, `Worker skipped: job is ${storedJob.status}.`);
+    return;
   }
 
   const request = storedJob.request;

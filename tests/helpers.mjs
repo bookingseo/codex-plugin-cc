@@ -30,3 +30,29 @@ export function initGitRepo(cwd) {
   run("git", ["config", "commit.gpgsign", "false"], { cwd });
   run("git", ["config", "tag.gpgsign", "false"], { cwd });
 }
+
+// Points the plugin state at a fresh directory for the duration of the callback.
+export function withPluginData(callback) {
+  const previous = process.env.CLAUDE_PLUGIN_DATA;
+  const dataDir = makeTempDir();
+  process.env.CLAUDE_PLUGIN_DATA = dataDir;
+  const restore = () => {
+    if (previous == null) {
+      delete process.env.CLAUDE_PLUGIN_DATA;
+    } else {
+      process.env.CLAUDE_PLUGIN_DATA = previous;
+    }
+  };
+  let result;
+  try {
+    result = callback(dataDir);
+  } catch (error) {
+    restore();
+    throw error;
+  }
+  if (result && typeof result.then === "function") {
+    return result.finally(restore);
+  }
+  restore();
+  return result;
+}

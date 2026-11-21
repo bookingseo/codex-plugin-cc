@@ -1,6 +1,6 @@
 {
   "name": "codex",
-  "version": "1.0.7-bookingseo.2",
+  "version": "1.0.7-bookingseo.3",
   "description": "Giao việc cho Codex, review code và phản biện spec ngay trong Claude Code.",
   "author": {
     "name": "bookingseo"

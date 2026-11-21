@@ -1,7 +1,7 @@
 import fs from "node:fs";
 
 import { getSessionRuntimeStatus } from "./codex.mjs";
-import { getConfig, listJobs, readJobFile, resolveJobFile } from "./state.mjs";
+import { getConfig, listJobs, readJobFile, resolveJobFile, upsertJob } from "./state.mjs";
 import { SESSION_ID_ENV } from "./tracked-jobs.mjs";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
 
@@ -40,6 +40,16 @@ export function assertTaskThreadIdle(jobs, threadId, excludeJobId) {
   if (active) {
     throw new Error(`Task ${active.id} is already using this thread. Check /codex:status ${active.id}.`);
   }
+}
+
+export function taskThreadIdleGuard(threadId, jobId) {
+  return (jobs) => assertTaskThreadIdle(jobs, threadId, jobId);
+}
+
+// Records the thread on the job's index entry only if no other queued or
+// running job holds it, as one step under the state lock.
+export function claimTaskThread(workspaceRoot, jobId, threadId) {
+  upsertJob(workspaceRoot, { id: jobId, threadId }, taskThreadIdleGuard(threadId, jobId));
 }
 
 export function resolveTaskThreadByJobId(workspaceRoot, jobId) {

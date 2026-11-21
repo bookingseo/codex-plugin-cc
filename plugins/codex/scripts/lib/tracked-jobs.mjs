@@ -148,10 +148,18 @@ export async function runTrackedJob(job, runner, options = {}) {
     pid: process.pid,
     logFile: options.logFile ?? job.logFile ?? null
   };
-  writeJobFile(job.workspaceRoot, job.id, runningRecord);
-  upsertJob(job.workspaceRoot, runningRecord);
+  try {
+    upsertJob(job.workspaceRoot, runningRecord, options.guard);
+  } catch (error) {
+    // Rejected before it was registered: leave no record or log behind.
+    if (options.guard && runningRecord.logFile) {
+      fs.rmSync(runningRecord.logFile, { force: true });
+    }
+    throw error;
+  }
 
   try {
+    writeJobFile(job.workspaceRoot, job.id, runningRecord);
     const execution = await runner();
     const completionStatus = execution.exitStatus === 0 ? "completed" : "failed";
     const completedAt = nowIso();

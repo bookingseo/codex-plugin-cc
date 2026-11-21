@@ -3,12 +3,14 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { withFileLock, writeFileAtomic } from "./state-lock.mjs";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
 
 const STATE_VERSION = 1;
 const PLUGIN_DATA_ENV = "CLAUDE_PLUGIN_DATA";
 const FALLBACK_STATE_ROOT_DIR = path.join(os.tmpdir(), "codex-companion");
 const STATE_FILE_NAME = "state.json";
+const STATE_LOCK_FILE_NAME = "state.lock";
 const JOBS_DIR_NAME = "jobs";
 const MAX_JOBS = 50;
 
@@ -89,9 +91,19 @@ function removeFileIfExists(filePath) {
   }
 }
 
-export function saveState(cwd, state) {
-  const previousJobs = loadState(cwd).jobs;
+function withStateLock(cwd, callback) {
   ensureStateDir(cwd);
+  return withFileLock(path.join(resolveStateDir(cwd), STATE_LOCK_FILE_NAME), callback);
+}
+
+// Jobs missing from `state` lose their record and log, so callers that derive
+// `state` from an earlier read must go through updateState instead.
+export function saveState(cwd, state) {
+  return withStateLock(cwd, () => writeState(cwd, state));
+}
+
+function writeState(cwd, state) {
+  const previousJobs = loadState(cwd).jobs;
   const nextJobs = pruneJobs(state.jobs ?? []);
   const nextState = {
     version: STATE_VERSION,
@@ -111,14 +123,18 @@ export function saveState(cwd, state) {
     removeFileIfExists(job.logFile);
   }
 
-  fs.writeFileSync(resolveStateFile(cwd), `${JSON.stringify(nextState, null, 2)}\n`, "utf8");
+  writeFileAtomic(resolveStateFile(cwd), `${JSON.stringify(nextState, null, 2)}\n`);
   return nextState;
 }
 
+// Load, mutate and save happen under one cross-process lock. Nothing is saved
+// when `mutate` throws.
 export function updateState(cwd, mutate) {
-  const state = loadState(cwd);
-  mutate(state);
-  return saveState(cwd, state);
+  return withStateLock(cwd, () => {
+    const state = loadState(cwd);
+    mutate(state);
+    return writeState(cwd, state);
+  });
 }
 
 export function generateJobId(prefix = "job") {
@@ -126,8 +142,11 @@ export function generateJobId(prefix = "job") {
   return `${prefix}-${Date.now().toString(36)}-${random}`;
 }
 
-export function upsertJob(cwd, jobPatch) {
+// `guard` sees the current jobs inside the same critical section as the write;
+// throwing from it rejects the upsert.
+export function upsertJob(cwd, jobPatch, guard = null) {
   return updateState(cwd, (state) => {
+    guard?.(state.jobs);
     const timestamp = nowIso();
     const existingIndex = state.jobs.findIndex((job) => job.id === jobPatch.id);
     if (existingIndex === -1) {
@@ -166,7 +185,7 @@ export function getConfig(cwd) {
 export function writeJobFile(cwd, jobId, payload) {
   ensureStateDir(cwd);
   const jobFile = resolveJobFile(cwd, jobId);
-  fs.writeFileSync(jobFile, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+  writeFileAtomic(jobFile, `${JSON.stringify(payload, null, 2)}\n`);
   return jobFile;
 }
 

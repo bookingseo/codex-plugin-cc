@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.7-bookingseo.3
+
+- Keep every job when several Codex commands update the job state at once. State updates now run under a cross-process lock and are written atomically.
+- Publish a background rescue before its worker starts, so the worker always finds its job and `/codex:status` reflects the real state.
+- Refuse a second run on a thread that another rescue is already using, whether it was selected with `--from` or `--resume`.
+
 ## 1.0.7-bookingseo.2
 
 - Continue a specific completed rescue with `/codex:rescue --from <job-id>`. Copy the command from `/codex:status` to return to its thread in the current Claude session.
