@@ -5,13 +5,13 @@
   },
   "metadata": {
     "description": "Giao việc cho Codex, review code và phản biện spec ngay trong Claude Code.",
-    "version": "1.0.7-bookingseo.1"
+    "version": "1.0.7-bookingseo.2"
   },
   "plugins": [
     {
       "name": "codex",
       "description": "Giao việc cho Codex, review code và phản biện spec ngay trong Claude Code.",
-      "version": "1.0.7-bookingseo.1",
+      "version": "1.0.7-bookingseo.2",
       "author": {
         "name": "bookingseo"
       },

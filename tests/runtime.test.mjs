@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { buildEnv, installFakeCodex } from "./fake-codex-fixture.mjs";
 import { initGitRepo, makeTempDir, run } from "./helpers.mjs";
 import { loadBrokerSession, saveBrokerSession } from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
-import { resolveStateDir } from "../plugins/codex/scripts/lib/state.mjs";
+import { listJobs, resolveStateDir, upsertJob } from "../plugins/codex/scripts/lib/state.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PLUGIN_ROOT = path.join(ROOT, "plugins", "codex");
@@ -810,6 +810,96 @@ test("conflicting execution flags fail before starting a Codex job", () => {
     assert.match(result.stderr, /Choose either --wait or --background/);
   }
   assert.equal(fs.existsSync(resolveStateDir(cwd)), false);
+});
+
+test("task --from resumes the chosen thread even after a different task completes", () => {
+  const cwd = makeTempDir();
+  const bin = makeTempDir();
+  installFakeCodex(bin);
+  const env = { ...buildEnv(bin), CODEX_COMPANION_SESSION_ID: "claude-from" };
+  function companion(...args) {
+    const call = run("node", [SCRIPT, ...args], { cwd, env });
+    assert.equal(call.status, 0, call.stderr);
+    return JSON.parse(call.stdout);
+  }
+  const first = companion("task", "--write", "--json", "--", "Fix retry");
+  const second = companion("task", "--json", "--", "Explain the cache");
+  assert.notEqual(first.threadId, second.threadId);
+  const status = companion("status", "--json");
+  const older = status.recent.find((job) => job.threadId === first.threadId);
+  assert.equal(older.resumeTaskCommand, `/codex:rescue --from ${older.id}`);
+
+  const prompt = "Explain the earlier change, including the literal --from flag.";
+  const followup = companion("task", "--from", older.id, "--json", "--", prompt);
+  assert.equal(followup.threadId, first.threadId);
+  const state = JSON.parse(fs.readFileSync(path.join(bin, "fake-codex-state.json"), "utf8"));
+  assert.equal(state.lastTurnStart.prompt, prompt);
+  assert.equal(state.requestedSandbox, "read-only");
+
+  const queued = companion("task", "--background", "--from", status.latestFinished.id, "--json");
+  const done = companion("status", queued.jobId, "--wait", "--timeout-ms", "20000", "--json");
+  assert.equal(done.job.status, "completed");
+  assert.equal(done.job.threadId, second.threadId);
+});
+
+test("task --from rejects unavailable or conflicting selections before queueing a run", () => {
+  const cwd = makeTempDir();
+  const bin = makeTempDir();
+  installFakeCodex(bin);
+  const env = { ...buildEnv(bin), CODEX_COMPANION_SESSION_ID: "claude-from" };
+  const base = { jobClass: "task", sessionId: "claude-from", status: "completed", threadId: "thr_1" };
+  const jobs = [
+    { ...base, id: "task-ok" },
+    { ...base, id: "task-other", sessionId: "other" },
+    { ...base, id: "review-only", jobClass: "review" },
+    { ...base, id: "task-gate", title: "Codex Stop Gate Review" },
+    { ...base, id: "task-live", status: "running" },
+    { ...base, id: "task-no-thread", threadId: null }
+  ];
+  for (const job of jobs) upsertJob(cwd, job);
+  for (const [args, error] of [
+    [["--from", "task-other"], /No job with that ID/],
+    [["--from", "task-missing"], /No job with that ID/],
+    [["--from", "task-o"], /full ID/],
+    [["--from", "review-only"], /completed rescue/],
+    [["--from", "task-gate"], /completed rescue/],
+    [["--from", "task-live"], /completed rescue/],
+    [["--from", "task-no-thread"], /saved thread/],
+    [["--from", "task-ok", "--resume-session"], /Use --from on its own/],
+    [["--from", "task-ok", "--fresh"], /Use --from on its own/]
+  ]) {
+    const result = run("node", [SCRIPT, "task", "--background", ...args], { cwd, env });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, error);
+  }
+  const missingSession = run("node", [SCRIPT, "task", "--from", "task-ok"], {
+    cwd, env: { ...env, CODEX_COMPANION_SESSION_ID: "" }
+  });
+  assert.equal(missingSession.status, 1);
+  assert.match(missingSession.stderr, /requires the current Claude session ID/);
+  assert.equal(listJobs(cwd).length, jobs.length);
+  assert.equal(fs.existsSync(path.join(bin, "fake-codex-state.json")), false);
+});
+
+test("task --from keeps a workspace boundary and avoids starting another turn on a busy thread", () => {
+  const cwd = makeTempDir();
+  const bin = makeTempDir();
+  installFakeCodex(bin);
+  const sessionId = "claude-busy";
+  const env = { ...buildEnv(bin), CODEX_COMPANION_SESSION_ID: sessionId };
+  const source = { id: "task-source", sessionId, jobClass: "task", status: "completed", threadId: "thr_busy" };
+  upsertJob(cwd, source);
+  const args = [SCRIPT, "task", "--background", "--from", source.id, "--", "Continue"];
+  const elsewhere = run("node", args, { cwd: makeTempDir(), env });
+  assert.equal(elsewhere.status, 1);
+  assert.match(elsewhere.stderr, /No job with that ID/);
+
+  upsertJob(cwd, { ...source, id: "task-in-flight", status: "running" });
+  const busy = run("node", args, { cwd, env });
+  assert.equal(busy.status, 1);
+  assert.match(busy.stderr, /already using this thread.*\/codex:status task-in-flight/);
+  assert.equal(listJobs(cwd).length, 2);
+  assert.equal(fs.existsSync(path.join(bin, "fake-codex-state.json")), false);
 });
 
 test("task forwards model selection and reasoning effort to app-server turn/start", () => {

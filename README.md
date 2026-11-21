@@ -33,6 +33,14 @@ Khi cần thiết kế, anh có thể dùng `/codex:rescue Soạn spec chống g
 
 ### Giao việc và tiếp tục
 
+Khi đã giao nhiều việc trong cùng phiên Claude, mở `/codex:status` và sao chép lệnh `/codex:rescue --from <job-id>` ở dòng của task muốn làm tiếp. Thêm yêu cầu mới phía sau mã job, chẳng hạn:
+
+```text
+/codex:rescue --from task-abc123 Sửa lỗi retry vừa tìm thấy và chạy test liên quan
+```
+
+Thay `task-abc123` bằng mã đầy đủ của anh. Codex tiếp tục ở lượt mới nhất trong thread của job đó, kể cả khi anh đã làm việc khác sau đó. Quyền ghi phụ thuộc vào yêu cầu lần này. Chỉ những task rescue đã hoàn tất trong cùng workspace và phiên Claude mới có lệnh nối lại.
+
 `/codex:rescue` mở task mới cho yêu cầu độc lập. Dùng `--resume` để tiếp tục task gần nhất của phiên Claude, hoặc `--fresh` để bắt đầu việc mới. Một câu nối tiếp rõ ràng như “tiếp tục sửa lỗi vừa tìm được” cũng được chuyển vào task trước. Khi thiếu phiên hoặc task, lệnh báo lý do. Codex nhận quyền ghi khi yêu cầu có thay đổi file. Có thể chỉ định `--model` (kể cả alias `spark`), `--effort`, `--wait` hoặc `--background`.
 
 Theo dõi việc chạy nền bằng `/codex:status [job-id]`, lấy đầu ra bằng `/codex:result [job-id]`, dừng bằng `/codex:cancel [job-id]`. Để chuyển **lịch sử phiên Claude** sang một thread Codex, dùng `/codex:transfer` rồi tiếp tục bằng lệnh `codex resume <session-id>` mà plugin trả về. Tác vụ rescue chỉ cần nội dung việc được giao.

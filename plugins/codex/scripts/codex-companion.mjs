@@ -35,12 +35,16 @@ import {
   writeJobFile
 } from "./lib/state.mjs";
 import {
+  assertTaskThreadIdle,
   buildSingleJobSnapshot,
   buildStatusSnapshot,
+  isRescueTask,
   readStoredJob,
   resolveCancelableJob,
   resolveResultJob,
-  sortJobsNewestFirst
+  resolveTaskThreadByJobId,
+  sortJobsNewestFirst,
+  STOP_REVIEW_TITLE
 } from "./lib/job-control.mjs";
 import {
   appendLogLine,
@@ -71,7 +75,6 @@ const DEFAULT_STATUS_POLL_INTERVAL_MS = 2000;
 const VALID_REASONING_EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh"]);
 const MODEL_ALIASES = new Map([["spark", "gpt-5.3-codex-spark"]]);
 const STOP_REVIEW_TASK_MARKER = "Run a stop-gate review of the previous Claude turn.";
-const STOP_REVIEW_TITLE = "Codex Stop Gate Review";
 
 function printUsage() {
   console.log(
@@ -80,7 +83,7 @@ function printUsage() {
       "  node scripts/codex-companion.mjs setup [--enable-review-gate|--disable-review-gate] [--json]",
       "  node scripts/codex-companion.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>]",
       "  node scripts/codex-companion.mjs adversarial-review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [focus text]",
-      "  node scripts/codex-companion.mjs task [--wait|--background] [--write] [--resume-session|--resume-last|--resume|--fresh] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh>] [prompt]",
+      "  node scripts/codex-companion.mjs task [--wait|--background] [--write] [--from <job-id>|--resume-session|--resume-last|--resume|--fresh] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh>] [prompt]",
       "  node scripts/codex-companion.mjs transfer [--source <claude-jsonl>] [--json]",
       "  node scripts/codex-companion.mjs status [job-id] [--all] [--json]",
       "  node scripts/codex-companion.mjs result [job-id] [--json]",
@@ -308,8 +311,7 @@ function findLatestResumableTaskJob(jobs) {
   return (
     jobs.find(
       (job) =>
-        job.jobClass === "task" &&
-        job.title !== STOP_REVIEW_TITLE &&
+        isRescueTask(job) &&
         job.threadId &&
         job.status !== "queued" &&
         job.status !== "running"
@@ -466,10 +468,13 @@ async function executeTaskRun(request) {
 
   const taskMetadata = buildTaskRunMetadata({
     prompt: request.prompt,
-    resumeLast: request.resumeLast
+    resuming: request.resumeLast || Boolean(request.resumeThreadId)
   });
 
-  let resumeThreadId = null;
+  let resumeThreadId = request.resumeThreadId ?? null;
+  if (resumeThreadId) {
+    assertTaskThreadIdle(listJobs(workspaceRoot), resumeThreadId, request.jobId);
+  }
   if (request.resumeLast) {
     const latestThread = await resolveLatestTrackedTaskThread(workspaceRoot, {
       excludeJobId: request.jobId
@@ -539,16 +544,16 @@ function buildReviewJobMetadata(reviewName, target) {
   };
 }
 
-function buildTaskRunMetadata({ prompt, resumeLast = false }) {
-  if (!resumeLast && String(prompt ?? "").includes(STOP_REVIEW_TASK_MARKER)) {
+function buildTaskRunMetadata({ prompt, resuming }) {
+  if (!resuming && String(prompt ?? "").includes(STOP_REVIEW_TASK_MARKER)) {
     return {
       title: STOP_REVIEW_TITLE,
       summary: "Stop-gate review of previous Claude turn"
     };
   }
 
-  const title = resumeLast ? "Codex Resume" : "Codex Task";
-  const fallbackSummary = resumeLast ? DEFAULT_CONTINUE_PROMPT : "Task";
+  const title = resuming ? "Codex Resume" : "Codex Task";
+  const fallbackSummary = resuming ? DEFAULT_CONTINUE_PROMPT : "Task";
   return {
     title,
     summary: shorten(prompt || fallbackSummary)
@@ -601,18 +606,6 @@ function buildTaskJob(workspaceRoot, taskMetadata, write) {
     summary: taskMetadata.summary,
     write
   });
-}
-
-function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, jobId }) {
-  return {
-    cwd,
-    model,
-    effort,
-    prompt,
-    write,
-    resumeLast,
-    jobId
-  };
 }
 
 function renderTransferResult(payload) {
@@ -766,7 +759,7 @@ async function handleReview(argv) {
 
 async function handleTask(argv) {
   const { options, positionals } = parseCommandInput(argv, {
-    valueOptions: ["model", "effort", "cwd", "prompt-file"],
+    valueOptions: ["model", "effort", "cwd", "prompt-file", "from"],
     booleanOptions: ["json", "write", "resume-last", "resume", "resume-session", "fresh", "background", "wait"],
     aliasMap: {
       m: "model"
@@ -787,48 +780,33 @@ async function handleTask(argv) {
 
   const resumeLast = Boolean(options["resume-last"] || options.resume || options["resume-session"]);
   const fresh = Boolean(options.fresh);
+  if (options.from !== undefined && (resumeLast || fresh)) {
+    throw new Error("Use --from on its own or choose --resume or --fresh.");
+  }
   if (resumeLast && fresh) {
     throw new Error("Choose either --resume/--resume-last or --fresh.");
   }
+  const resumeThreadId = options.from === undefined ? null : resolveTaskThreadByJobId(workspaceRoot, options.from);
+  const resuming = resumeLast || Boolean(resumeThreadId);
   const write = Boolean(options.write);
-  const taskMetadata = buildTaskRunMetadata({
-    prompt,
-    resumeLast
-  });
+  const taskMetadata = buildTaskRunMetadata({ prompt, resuming });
+  const job = buildTaskJob(workspaceRoot, taskMetadata, write);
+  if (resumeThreadId) {
+    job.threadId = resumeThreadId;
+  }
+  const request = { cwd, model, effort, prompt, write, resumeLast, resumeThreadId, jobId: job.id };
 
   if (options.background) {
     ensureCodexAvailable(cwd);
-    requireTaskRequest(prompt, resumeLast);
-
-    const job = buildTaskJob(workspaceRoot, taskMetadata, write);
-    const request = buildTaskRequest({
-      cwd,
-      model,
-      effort,
-      prompt,
-      write,
-      resumeLast,
-      jobId: job.id
-    });
+    requireTaskRequest(prompt, resuming);
     const { payload } = enqueueBackgroundTask(cwd, job, request);
     outputCommandResult(payload, renderQueuedTaskLaunch(payload), options.json);
     return;
   }
 
-  const job = buildTaskJob(workspaceRoot, taskMetadata, write);
   await runForegroundCommand(
     job,
-    (progress) =>
-      executeTaskRun({
-        cwd,
-        model,
-        effort,
-        prompt,
-        write,
-        resumeLast,
-        jobId: job.id,
-        onProgress: progress
-      }),
+    (progress) => executeTaskRun({ ...request, onProgress: progress }),
     { json: options.json }
   );
 }

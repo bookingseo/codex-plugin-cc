@@ -42,6 +42,7 @@ test("rescue hands off once without another Claude agent or a resume probe", () 
   assert.match(source, /^allowed-tools: Bash\(node:\*\)$/m);
   assert.match(source, /codex-companion\.mjs" task/);
   assert.match(source, /--resume-session/);
+  assert.match(source, /--from <job-id>/);
   assert.match(source, /--fresh/);
   assert.match(source, /--write.*only for an explicit edit/);
   assert.doesNotMatch(source, /task-resume-candidate|AskUserQuestion|^context: fork/m);

@@ -7,6 +7,7 @@ import { resolveWorkspaceRoot } from "./workspace.mjs";
 
 export const DEFAULT_MAX_STATUS_JOBS = 8;
 export const DEFAULT_MAX_PROGRESS_LINES = 4;
+export const STOP_REVIEW_TITLE = "Codex Stop Gate Review";
 
 export function sortJobsNewestFirst(jobs) {
   return [...jobs].sort((left, right) => String(right.updatedAt ?? "").localeCompare(String(left.updatedAt ?? "")));
@@ -22,6 +23,40 @@ function filterJobsForCurrentSession(jobs, options = {}) {
     return jobs;
   }
   return jobs.filter((job) => job.sessionId === sessionId);
+}
+
+export function isRescueTask(job) {
+  return (job.jobClass ?? job.kind) === "task" && job.title !== STOP_REVIEW_TITLE;
+}
+
+function canResumeInSession(job, sessionId) {
+  return Boolean(sessionId) && job.sessionId === sessionId && isRescueTask(job) &&
+    job.status === "completed" && typeof job.threadId === "string" && job.threadId.trim().length > 0;
+}
+
+export function assertTaskThreadIdle(jobs, threadId, excludeJobId) {
+  const active = jobs.find((job) => job.id !== excludeJobId && job.threadId === threadId &&
+    (job.status === "queued" || job.status === "running"));
+  if (active) {
+    throw new Error(`Task ${active.id} is already using this thread. Check /codex:status ${active.id}.`);
+  }
+}
+
+export function resolveTaskThreadByJobId(workspaceRoot, jobId) {
+  const sessionId = getCurrentSessionId();
+  if (!sessionId) {
+    throw new Error("--from requires the current Claude session ID.");
+  }
+  const jobs = listJobs(workspaceRoot);
+  const job = jobs.find((item) => item.id === jobId && item.sessionId === sessionId);
+  if (!job) {
+    throw new Error("No job with that ID in the current workspace and Claude session. Copy its full ID from /codex:status.");
+  }
+  if (!canResumeInSession(job, sessionId)) {
+    throw new Error("Choose a completed rescue job with a saved thread. Run /codex:status to list jobs.");
+  }
+  assertTaskThreadIdle(jobs, job.threadId);
+  return job.threadId;
 }
 
 function getJobTypeLabel(job) {
@@ -163,6 +198,7 @@ export function enrichJob(job, options = {}) {
   const enriched = {
     ...job,
     kindLabel: getJobTypeLabel(job),
+    resumeTaskCommand: canResumeInSession(job, getCurrentSessionId(options)) ? `/codex:rescue --from ${job.id}` : null,
     progressPreview:
       job.status === "queued" || job.status === "running" || job.status === "failed"
         ? readJobProgressPreview(job.logFile, maxProgressLines)
@@ -219,14 +255,14 @@ export function buildStatusSnapshot(cwd, options = {}) {
 
   const running = jobs
     .filter((job) => job.status === "queued" || job.status === "running")
-    .map((job) => enrichJob(job, { maxProgressLines }));
+    .map((job) => enrichJob(job, { env: options.env, maxProgressLines }));
 
   const latestFinishedRaw = jobs.find((job) => job.status !== "queued" && job.status !== "running") ?? null;
-  const latestFinished = latestFinishedRaw ? enrichJob(latestFinishedRaw, { maxProgressLines }) : null;
+  const latestFinished = latestFinishedRaw ? enrichJob(latestFinishedRaw, { env: options.env, maxProgressLines }) : null;
 
   const recent = (options.all ? jobs : jobs.slice(0, maxJobs))
     .filter((job) => job.status !== "queued" && job.status !== "running" && job.id !== latestFinished?.id)
-    .map((job) => enrichJob(job, { maxProgressLines }));
+    .map((job) => enrichJob(job, { env: options.env, maxProgressLines }));
 
   return {
     workspaceRoot,
@@ -249,7 +285,7 @@ export function buildSingleJobSnapshot(cwd, reference, options = {}) {
 
   return {
     workspaceRoot,
-    job: enrichJob(selected, { maxProgressLines: options.maxProgressLines })
+    job: enrichJob(selected, options)
   };
 }
 

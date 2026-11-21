@@ -142,6 +142,9 @@ function pushJobDetails(lines, job, options = {}) {
   if (resumeCommand) {
     lines.push(`  Resume in Codex: ${resumeCommand}`);
   }
+  if (job.resumeTaskCommand) {
+    lines.push(`  Continue in Claude: ${job.resumeTaskCommand}`);
+  }
   if (job.logFile && options.showLog) {
     lines.push(`  Log: ${job.logFile}`);
   }
